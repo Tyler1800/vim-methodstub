@@ -50,7 +50,7 @@ class PrecedingFunctionTraverser(Traverser):
             return False
         if cursor.location is not None and cursor.location.file is not None:
             if cursor.location.file.name == self._source_file:
-                if is_cursor_function(cursor):
+                if is_cursor_function(cursor): 
                     if cursor.canonical == self._find_fn.canonical:
                         self._found_fn = True
                     elif self._found_fn:
@@ -72,7 +72,10 @@ class DefinitionTraverser(Traverser):
             return False
         if cursor.location is not None and cursor.location.file is not None:
             if cursor.location.file.name == self._source_file:
-                if is_cursor_function(cursor):
+                #Avoid functions that are within the lexical scope of the class
+                #(so function declarations or inline definitions)
+                if is_cursor_function(cursor) and cursor.lexical_parent.canonical != \
+                        self._find_fn.semantic_parent.canonical:
                     if cursor.canonical == self._find_fn.canonical:
                         self._output = cursor
                         return False
@@ -90,32 +93,30 @@ def get_cursor_from_location(tu, location):
     cursor = clang.cindex.Cursor.from_location(tu, location)
     return cursor
 
-def get_corresponding_file(file_name, header=True):
+def get_corresponding_file(file_name, extensions):
     file = file_name.split('.')
     ext = file[len(file)-1]
-    file = file[:len(file)-1]
+    file = '.'.join(file[:len(file)-1])
 
-    header_ext = ['.hpp', '.hxx', '.h']
-    source_ext = ['.cpp', '.cxx', '.c']
-    
-    if header:
-        if ext in header_ext:
-            return file_name
-        else:
-            file.append('h')
-            return '.'.join(file)
-
+    #If file_name already has a correct extension, just return it
+    if ext in extensions:
+        return file_name
+    #Otherwise, look for a file or open buffer with one of
+    #the given extensions
     else:
-        if ext in source_ext:
-            return file_name
-        else:
-            file.append('cpp')
-            return '.'.join(file)
+        for new_ext in extensions:
+            new_file = file + new_ext
+            if get_buffer_with_name(new_file) or \
+                    os.path.exists(new_file):
+                return new_file
+        return None
 
 def get_header_file(file_name):
-    return get_corresponding_file(file_name, True)
+    header_ext = ['.hpp', '.hxx', '.h']
+    return get_corresponding_file(file_name, header_ext)
 def get_source_file(file_name):
-    return get_corresponding_file(file_name, False)
+    source_ext = ['.cpp', '.cxx', '.c']
+    return get_corresponding_file(file_name, source_ext)
 
 def get_buffer_with_name(name):
     for buf in vim.buffers:
@@ -185,12 +186,15 @@ def get_args_list(fn_cursor):
 
     return ', '.join(arg_string)
 
-def make_function_header(fn_cursor):
+def make_function_header(fn_cursor, inline=False):
     args_list = get_args_list(fn_cursor)
     name = fn_cursor.spelling
     return_type = fn_cursor.result_type.spelling
 
     fn_header = []
+
+    if inline:
+        fn_header.append('inline ')
 
     if fn_cursor.kind != CursorKind.CONSTRUCTOR and \
             fn_cursor.kind != CursorKind.DESTRUCTOR:
@@ -264,25 +268,26 @@ def get_output_location(tu, fn_cursor, out_file, header_file):
 
         line = 0
         if inner_namespace:
-            last_line = inner_namespace.extent.end.line
+            line = inner_namespace.extent.end.line
 
-    #If neither works, just put it at the end, which -1 happens to do
+    #If neither works, just put it at the end, which -1 represents
 
     return (inner_namespace, line - 1)
 
-def generate_method_stub(tu, cursor, out_file, header_file, buffer):
-    header_string = make_function_header(cursor)
-
+def generate_method_stub(tu, cursor, out_file, header_file):
     namespace, line = get_output_location(tu, cursor, out_file, header_file)
-    if line < 0:
-        line = len(buffer)
+    inline = False
+    if out_file == header_file:
+        inline = True
+    header_string = make_function_header(cursor, inline=inline)
     
     fn_string = '\n'.join([header_string, '{', ' ', '}', ' '])
 
-    write_method(fn_string, buffer, line)
-    return True
+    return (fn_string, line)
 
 def write_method(fn_string, buffer, line):
+    if line < 0:
+        line = len(buffer)
     buffer[line:line] = fn_string.split('\n')
     command = 'normal! {0}G'.format(line + 3)
     vim.command(command)
@@ -325,13 +330,18 @@ def generate_under_cursor():
     header_file = get_header_file(name)
     source_file = get_source_file(name)
 
+    #TODO: This should probably be made to work
+    if source_file == name:
+        error("Unable to implement a method in the source file.")
+        return
+
     unsaved_data = build_unsaved_data([header_file, source_file])
 
     if source_file:
         parse_file_name = source_file
     else:
         parse_file_name = header_file
-            
+
     index = clang.cindex.Index.create()
     tu = create_translation_unit(index, parse_file_name, unsaved_data)
 
@@ -343,14 +353,17 @@ def generate_under_cursor():
         error('Unable to find a function at the location specified')
         return
 
-    buffer = get_buffer_with_name(source_file)
-    if buffer is None:
-        vim.command('e {0}'.format(source_file))
-        buffer = vim.current.buffer
-    else:
-        vim.command('b! {0}'.format(source_file))
+    buffer = get_buffer_with_name(parse_file_name)
+    if buffer is not vim.current.buffer:
+        if buffer is None:
+            vim.command('e {0}'.format(source_file))
+            buffer = vim.current.buffer
+        else:
+            vim.command('b! {0}'.format(source_file))
 
-    generate_method_stub(tu, cursor, parse_file_name, header_file, buffer)
+    function_body, line = generate_method_stub(tu, cursor, \
+            parse_file_name, header_file)
+    write_method(function_body, buffer, line)
 
 def find_fn_name_from_line(str):
     last_parenthesis = str.rfind(')')
