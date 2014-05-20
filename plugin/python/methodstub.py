@@ -1,6 +1,6 @@
 import os
 import sys
-from contextlib import contextmanager
+import collections
 
 import clang.cindex
 from clang.cindex import CursorKind
@@ -13,7 +13,7 @@ class Traverser(object):
     
     def traverse(self, cursor):
         self._start_traversal(cursor)
-        output = self._output
+        output = self._get_output()
         self._output = None
         return output 
 
@@ -22,6 +22,9 @@ class Traverser(object):
 
     def _start_traversal(self, cursor):
         iterate_cursor(cursor, self._traversal_fn)
+
+    def _get_output(self):
+        return self._output
 
 class NamespaceTraverser(Traverser):
     def __init__(self, source_file):
@@ -38,47 +41,44 @@ class NamespaceTraverser(Traverser):
                 return False
         return True
 
-class PrecedingFunctionTraverser(Traverser):
+class FollowingFunctionTraverser(Traverser):
     def __init__(self, source_file, find_fn):
         self._source_file = source_file
         self._find_fn = find_fn
         self._found_fn = False
-        self._output = None
+        self._output = []
 
     def _traversal_fn(self, cursor, parent):
-        if self._output is not None:
-            return False
-        if cursor.location is not None and cursor.location.file is not None:
+        if cursor.location.file is not None:
             if cursor.location.file.name == self._source_file:
-                if is_cursor_function(cursor): 
-                    if cursor.canonical == self._find_fn.canonical:
-                        self._found_fn = True
-                    elif self._found_fn:
-                        self._output = cursor
-                        return False
+                if is_cursor_function(cursor) and cursor.lexical_parent.canonical == \
+                        self._find_fn.lexical_parent.canonical and self._found_fn:
+                    self._output.append(cursor)
+                if self._find_fn.canonical == cursor.canonical:
+                    self._found_fn = True
             else:
                 return False
-
         return True
 
 class DefinitionTraverser(Traverser):
     def __init__(self, source_file, find_fn):
         self._source_file = source_file
         self._find_fn = find_fn
-        self._output = None
+        self._find_fn_parent = find_fn.semantic_parent.canonical
+        self._output = {}
 
     def _traversal_fn(self, cursor, parent):
-        if self._output is not None:
-            return False
         if cursor.location is not None and cursor.location.file is not None:
             if cursor.location.file.name == self._source_file:
                 #Avoid functions that are within the lexical scope of the class
                 #(so function declarations or inline definitions)
-                if is_cursor_function(cursor) and cursor.lexical_parent.canonical != \
-                        self._find_fn.semantic_parent.canonical:
-                    if cursor.canonical == self._find_fn.canonical:
-                        self._output = cursor
-                        return False
+                if is_cursor_function(cursor) and \
+                        cursor.lexical_parent.canonical != self._find_fn_parent:
+                            name = cursor.spelling
+                            if name in self._output:
+                               self._output[name].append(cursor)
+                            else:
+                                self._output[name] = [cursor]
             else:
                 return False
         return True
@@ -236,6 +236,21 @@ def get_member_class_name(cursor):
         return '::'.join(name)
     return None
 
+def find_closest_function_definition(tu, out_file, target_fn, fn_list):
+    if len(fn_list) > 0:
+        traverser = DefinitionTraverser(out_file, target_fn)
+        fn_dict = traverser.traverse(tu.cursor)
+        
+        for fn in fn_list:
+            name = fn.spelling
+            if name in fn_dict:
+                cur_list = fn_dict[name]
+                for cur in cur_list:
+                    if cur.canonical == fn.canonical:
+                        return cur
+    return None
+
+
 def get_output_location(tu, fn_cursor, out_file, header_file):
     parent = fn_cursor.semantic_parent
     inner_namespace = None
@@ -245,17 +260,17 @@ def get_output_location(tu, fn_cursor, out_file, header_file):
             break
         parent = parent.semantic_parent
     
-    traverser = PrecedingFunctionTraverser(header_file, fn_cursor)
-    prev_fn = traverser.traverse(fn_cursor.semantic_parent)
+    # traverser = PrecedingFunctionTraverser(header_file, fn_cursor)
+    # prev_fn = traverser.traverse(fn_cursor.semantic_parent)
+    traverser = FollowingFunctionTraverser(header_file, fn_cursor)
+    fn_list = traverser.traverse(fn_cursor.semantic_parent)
 
     line = 0
 
     #Try to put the new function above the function below it in the header
-    if prev_fn:
-        traverser = DefinitionTraverser(out_file, prev_fn)
-        fn_def = traverser.traverse(tu.cursor)
-        if fn_def is not None:
-            line = fn_def.extent.start.line
+    fn_def = find_closest_function_definition(tu, out_file, fn_cursor, fn_list)
+    if fn_def:
+        line = fn_def.extent.start.line
 
     #Otherwise, put it at the bottom of the innermost namespace
     if line == 0:
