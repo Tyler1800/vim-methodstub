@@ -175,29 +175,103 @@ def format_type_name(old_name):
 
 def get_args_list(fn_cursor):
     arg_string = []
-    args = []
 
-    for i, arg in enumerate(fn_cursor.get_arguments()):
-        arg_type = format_type_name(arg.type.spelling)
-        arg_name = arg.spelling
-        arg_string.append('{0} {1}'.format(arg_type, arg_name))
-        if arg_name == '':
-            arg_string[i] = arg_string[i][:len(arg_string[i])-1]
+    #get_args is exposed by clang, but in some rare circumstances wasn't
+    #returning arguments that existed, so we do it manually
+    for child in fn_cursor.get_children():
+        if child.kind == CursorKind.PARM_DECL:
+            arg_fragments = []
+            type_name = format_type_name(child.type.spelling)
+            arg_fragments.append(type_name)
+            name = child.spelling
+            if name != '':
+                arg_fragments.append(name)
+            arg_string.append(' '.join(arg_fragments))
 
     return ', '.join(arg_string)
 
+def get_template_args(cursor):
+    template_args = []
+    for child in cursor.get_children():
+        if child.kind == CursorKind.TEMPLATE_TYPE_PARAMETER:
+            template_args.append(child.spelling)
+
+    return template_args
+
+
+def get_template_declaration(cursor):
+    template_string = None 
+    template_args = get_template_args(cursor)
+    if len(template_args) > 0:
+        template_string = 'template<typename '
+        template_string += ', typename'.join(template_args) + '>'
+
+    return template_string
+
+
+def get_member_class_name(cursor):
+    cur = cursor.semantic_parent
+    name = []
+    while cur is not None:
+        if cur.kind == CursorKind.CLASS_DECL or \
+            cur.kind == CursorKind.CLASS_TEMPLATE:
+            name.append(cur.spelling)
+        cur = cur.semantic_parent
+
+    out_string = None
+    if len(name) > 0:
+        out_string = '::'.join(name)
+        template_args = get_template_args(cursor.semantic_parent)
+        if len(template_args) > 0:
+            out_string += '<{0}>'.format(', '.join(template_args))
+
+    return out_string
+
+def strip_template_args(fn_name):
+    '''Clang adds <...> args to the spelling of template functions,
+       this removes that.'''
+    start = fn_name.find('<')
+    if start == -1:
+        return fn_name
+    depth = 0
+    end = -1
+    for i in range(start, len(fn_name)):
+        ch = fn_name[i]
+        if ch == '<':
+            depth += 1
+        elif ch == '>':
+            depth -= 1
+        if depth == 0:
+            end = i
+            break
+    if end > 0:
+        return fn_name[:start] + fn_name[end+1:]
+    else:
+        return fn_name
+
+
 def make_function_header(fn_cursor, inline=False):
     args_list = get_args_list(fn_cursor)
-    name = fn_cursor.spelling
+    name = strip_template_args(fn_cursor.spelling)
+
     return_type = fn_cursor.result_type.spelling
+    class_template_decl = get_template_declaration(fn_cursor.semantic_parent)
+    fn_template_decl = get_template_declaration(fn_cursor)
 
     fn_header = []
+    if class_template_decl:
+        fn_header.extend([class_template_decl, '\n'])
+    if fn_template_decl:
+        fn_header.extend([fn_template_decl, '\n'])
 
     if inline:
         fn_header.append('inline ')
 
+    #Templated constructors are marked as TEMPLATE_FUNCTION not CONSTRUCTOR.
+    #They are rare but we should still detect them manually.
     if fn_cursor.kind != CursorKind.CONSTRUCTOR and \
-            fn_cursor.kind != CursorKind.DESTRUCTOR:
+            fn_cursor.kind != CursorKind.DESTRUCTOR and \
+            name != fn_cursor.semantic_parent.spelling:
         fn_header.extend([format_type_name(return_type),  ' '])
 
     class_name = get_member_class_name(fn_cursor)
@@ -223,19 +297,6 @@ def make_function_header(fn_cursor, inline=False):
 
     return ''.join(fn_header)
 
-def get_member_class_name(cursor):
-    cur = cursor.semantic_parent
-    name = []
-    while cur is not None:
-        if cur.kind == CursorKind.CLASS_DECL or \
-            cur.kind == CursorKind.CLASS_TEMPLATE:
-            name.append(cur.spelling)
-        cur = cur.semantic_parent
-
-    if len(name) > 0:
-        return '::'.join(name)
-    return None
-
 def find_closest_function_definition(tu, out_file, target_fn, fn_list):
     if len(fn_list) > 0:
         traverser = DefinitionTraverser(out_file, target_fn)
@@ -250,20 +311,21 @@ def find_closest_function_definition(tu, out_file, target_fn, fn_list):
                         return cur
     return None
 
+def get_innermost_containing_namespace(cursor):
+    cur = cursor
+    while cur is not None:
+        if cur.kind == CursorKind.NAMESPACE:
+            return cur
+        cur = cur.semantic_parent
+    return None
+
 
 def get_output_location(tu, fn_cursor, out_file, header_file):
     parent = fn_cursor.semantic_parent
-    inner_namespace = None
-    while parent is not None:
-        if parent.kind == CursorKind.NAMESPACE:
-            inner_namespace = parent
-            break
-        parent = parent.semantic_parent
-    
-    # traverser = PrecedingFunctionTraverser(header_file, fn_cursor)
-    # prev_fn = traverser.traverse(fn_cursor.semantic_parent)
+    inner_namespace = get_innermost_containing_namespace(parent)
+
     traverser = FollowingFunctionTraverser(header_file, fn_cursor)
-    fn_list = traverser.traverse(fn_cursor.semantic_parent)
+    fn_list = traverser.traverse(parent)
 
     line = 0
 
