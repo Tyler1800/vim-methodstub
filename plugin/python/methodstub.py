@@ -1,5 +1,6 @@
 import os
 import sys
+import collections
 
 import clang.cindex
 from clang.cindex import CursorKind
@@ -290,41 +291,9 @@ def strip_template_args(fn_name):
     else:
         return fn_name
 
-
-def make_function_header(fn_cursor, inline=False):
-    '''Return a header string for the function fn_cursor.
-       If inline is True, the function is marked inline in the header.'''
-    args_list = get_args_list(fn_cursor)
-    name = strip_template_args(fn_cursor.spelling)
-
-    return_type = fn_cursor.result_type.spelling
-    class_template_decl = get_template_declaration(fn_cursor.semantic_parent)
-    fn_template_decl = get_template_declaration(fn_cursor)
-
-    fn_header = []
-    if class_template_decl:
-        fn_header.extend([class_template_decl, '\n'])
-    if fn_template_decl:
-        fn_header.extend([fn_template_decl, '\n'])
-
-    if inline:
-        fn_header.append('inline ')
-
-    #Templated constructors are marked as TEMPLATE_FUNCTION not CONSTRUCTOR.
-    #They are rare but we should still detect them manually.
-    if fn_cursor.kind != CursorKind.CONSTRUCTOR and \
-            fn_cursor.kind != CursorKind.DESTRUCTOR and \
-            name != fn_cursor.semantic_parent.spelling:
-        fn_header.extend([format_type_name(return_type), ' '])
-
-    class_name = get_member_class_name(fn_cursor)
-    if class_name is not None and class_name != '':
-        fn_header.extend([class_name, "::"])
-
-    fn_header.append('{0}({1})'.format(name, args_list))
-
-    #clang.cindex doesn't seem to expose many specifiers for functions,
-    #so try to find them in the token stream.
+def add_function_specifiers(fn_cursor, header):
+    '''Find specifier keywords in the token stream and add them
+       to the deque header'''
     depth = 0
     for t in fn_cursor.get_tokens():
         if t.spelling == '{':
@@ -334,9 +303,53 @@ def make_function_header(fn_cursor, inline=False):
         elif t.spelling == ')':
             depth -= 1
         elif t.spelling == 'const' and depth == 0:
-            fn_header.append(' const')
+            header.append(' const')
         elif t.spelling == 'noexcept' and depth == 0:
-            fn_header.append(' noexcept')
+            header.append(' noexcept')
+        elif t.spelling == 'constexpr' and depth == 0:
+            header.appendleft('constexpr ')
+
+def make_function_header(fn_cursor, inline=False, namespace=''):
+    '''Return a header string for the function fn_cursor.
+       If inline is True, the function is marked inline in the header.'''
+    args_list = get_args_list(fn_cursor)
+    name = strip_template_args(fn_cursor.spelling)
+
+    return_type = fn_cursor.result_type.spelling
+    class_template_decl = get_template_declaration(fn_cursor.semantic_parent)
+    fn_template_decl = get_template_declaration(fn_cursor)
+
+    fn_header = collections.deque()
+
+    if namespace != '':
+        fn_header.append(namespace)
+        fn_header.append('::')
+
+    class_name = get_member_class_name(fn_cursor)
+    if class_name is not None and class_name != '':
+        fn_header.extend([class_name, "::"])
+
+    fn_header.append('{0}({1})'.format(name, args_list))
+
+    #Templated constructors are marked as TEMPLATE_FUNCTION not CONSTRUCTOR.
+    #They are rare but we should still detect them manually.
+    if fn_cursor.kind != CursorKind.CONSTRUCTOR and \
+            fn_cursor.kind != CursorKind.DESTRUCTOR and \
+            name != fn_cursor.semantic_parent.spelling:
+        fn_header.appendleft(format_type_name(return_type)  + ' ')
+
+    #clang.cindex doesn't seem to expose many specifiers for functions,
+    #so try to find them in the token stream.
+    add_function_specifiers(fn_cursor, fn_header)
+
+    if inline:
+        fn_header.appendleft('inline ')
+
+    if fn_template_decl:
+        fn_header.appendleft(fn_template_decl + '\n')
+    if class_template_decl:
+        fn_header.appendleft(class_template_decl + '\n')
+
 
     return ''.join(fn_header)
 
@@ -366,17 +379,28 @@ def find_closest_function_definition(tu, target_fn, fn_list, definitions):
        definitions'''
     if len(fn_list) > 0:
         for fn in fn_list:
-            return get_definition_for_function(definitions, fn)
+            out = get_definition_for_function(definitions, fn)
+            if out:
+                return out
     return None
 
-def get_innermost_containing_namespace(cursor):
-    '''Return the innermost namespace that is a parent of cursor'''
+def get_namespaces(cursor):
+    '''Return a list of all namespaces cursor belongs to'''
+    namespaces = []
     cur = cursor
     while cur is not None:
         if cur.kind == CursorKind.NAMESPACE:
-            return cur
+            namespaces.append(cur)
         cur = cur.semantic_parent
-    return None
+    return namespaces[::-1]
+
+def get_lexical_namespaces(tu, cursor, source_file):
+    '''Return a list of all namespaces cursor is enclosed by
+       within the file source_file'''
+    traverser = NamespaceTraverser(source_file, cursor)
+    namespace_list = traverser.traverse(tu.cursor)
+    return namespace_list
+
 
 def get_following_declarations(header_file, fn_cursor):
     '''Get all function declarations in the same scope but below
@@ -385,57 +409,81 @@ def get_following_declarations(header_file, fn_cursor):
     return traverser.traverse(fn_cursor.semantic_parent)
 
 
-def get_output_location(tu, fn_cursor, files, above_def):
+def get_output_location(tu, fn_cursor, files, above_def, namespaces):
     '''Return the line at which to insert the function definition'''
     parent = fn_cursor.semantic_parent
-    inner_namespace = get_innermost_containing_namespace(parent)
 
     line = 0
 
     #Try to put the new function above the function below it in the header
     if above_def is not None:
-        line = above_def.extent.start.line
+        line = above_def.extent.start.line - 1
 
     #Otherwise, put it at the bottom of the innermost namespace
     if line == 0:
-        traverser = NamespaceTraverser(files.output, fn_cursor)
-        namespace_list = traverser.traverse(tu.cursor)
-        namespace_list = namespace_list[::-1]
-        
         inner_namespace = None
-        if len(namespace_list) > 0:
-            inner_namespace = namespace_list[0]
+        if len(namespaces) > 0:
+            inner_namespace = namespaces[len(namespaces)-1]
 
-        line = 0
         if inner_namespace:
-            line = inner_namespace.extent.end.line
+            line = inner_namespace.extent.end.line - 1
 
-    #If neither works, just put it at the end, which -1 represents
+    #If neither works, just put it at the end, is represented by -1
+    if line == 0:
+        line = -1
 
-    return (inner_namespace, line - 1)
+    return line
+
+def build_namespace_scope_resolution(namespaces, lexical_namespaces):
+    '''Return a string needed to resolve a symbol belonging to namespaces
+       that is located within lexical_namespaces inside the source'''
+    #lexical_depth is how many lexical_namespaces match namespaces
+    lexical_depth = 0
+    for i in range(0, len(lexical_namespaces)):
+        if i >= len(namespaces):
+            break
+        if namespaces[i].canonical == lexical_namespaces[i].canonical:
+            lexical_depth += 1
+        else:
+            break
+
+    namespace_parts = []
+    for i in range(lexical_depth, len(namespaces)):
+        namespace_parts.append(namespaces[i].spelling)
+    return '::'.join(namespace_parts)
+
 
 def generate_method_stub(tu, cursor, files, force=False):
     '''Return a tuple of a string containing the function definition
        and a line number to insert it for the function cursor.'''
+
     definitions = find_defined_functions(tu, files.output, cursor)
     definition = get_definition_for_function(definitions, cursor)
+
     if definition and not force:
-        error("'{0}' is already defined at {1}:{2}".format( 
+        error("'{0}' is already defined at {1}:{2}".format(
             cursor.displayname, definition.location.file, \
             definition.location.line))
         return None
-    
+
     decl_list = get_following_declarations(files.header, cursor)
     next_def = find_closest_function_definition(tu, cursor, \
             decl_list, definitions)
 
-    namespace, line = get_output_location(tu, cursor, files, next_def)
+    namespaces = get_namespaces(cursor)
+    lexical_namespaces = get_lexical_namespaces(tu, cursor, files.output)
+
+    namespace_str = build_namespace_scope_resolution(namespaces, lexical_namespaces)
 
     inline = False
     if files.is_output_header():
         inline = True
-    header_string = make_function_header(cursor, inline=inline)
-    
+    header_string = make_function_header(cursor, inline=inline, \
+            namespace=namespace_str)
+
+
+    line = get_output_location(tu, cursor, files, next_def, lexical_namespaces)
+
     fn_string = '\n'.join([header_string, '{', ' ', '}', ' '])
 
     return (fn_string, line)
