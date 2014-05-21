@@ -6,7 +6,22 @@ from clang.cindex import CursorKind
 
 import vim
 
+class FileSet(object):
+    '''Provides a single object to store all file information.'''
+    def __init__(self, source, header, input, output):
+        self.source = source
+        self.header = header
+        self.input = input
+        self.output = output
+
+    def is_input_header(self):
+        return self.header == self.input
+
+    def is_output_header(self):
+        return self.header == self.output
+
 class Traverser(object):
+    '''Defined an interface for classes that need to traverse the AST.'''
     def __init__(self):
         self._output = None 
     
@@ -26,6 +41,8 @@ class Traverser(object):
         return self._output
 
 class NamespaceTraverser(Traverser):
+    '''Traverser that generates a list of namespace
+       cursors containing the given function.'''
     def __init__(self, source_file, target_fn):
         self._source_file = source_file
         self._target_fn = target_fn
@@ -47,6 +64,8 @@ class NamespaceTraverser(Traverser):
         return True
 
 class FollowingFunctionTraverser(Traverser):
+    '''Traverser that generates a list of all function declarations
+       occuring after the given declaration in the same scope.'''
     def __init__(self, source_file, find_fn):
         self._source_file = source_file
         self._find_fn = find_fn
@@ -66,6 +85,7 @@ class FollowingFunctionTraverser(Traverser):
         return True
 
 class DefinitionTraverser(Traverser):
+    '''Traverser that finds all function definitions in a file.'''
     def __init__(self, source_file, find_fn):
         self._source_file = source_file
         self._find_fn = find_fn
@@ -79,26 +99,34 @@ class DefinitionTraverser(Traverser):
                 #(so function declarations or inline definitions)
                 if is_cursor_function(cursor) and \
                         cursor.lexical_parent.canonical != self._find_fn_parent:
-                            name = cursor.spelling
-                            if name in self._output:
-                               self._output[name].append(cursor)
-                            else:
-                                self._output[name] = [cursor]
+                    name = cursor.spelling
+                    if name in self._output:
+                        self._output[name].append(cursor)
+                    else:
+                        self._output[name] = [cursor]
             else:
                 return False
         return True
 
 def create_translation_unit(index, source, unsaved_data=[]):
-    return index.parse(None, [source] + ['-xc++', '-std=c++11', '-I/usr/lib/clang/3.4/include'], \
+    '''Build a translation unit by parsing the file source using
+       index index with unsaved_data containing a list of(name, data) tuples
+       with the full content of any unsaved buffers.'''
+    return index.parse(None, [source] + ['-xc++', '-std=c++11'], \
             unsaved_data, \
             clang.cindex.TranslationUnit.PARSE_SKIP_FUNCTION_BODIES)
 
 
 def get_cursor_from_location(tu, location):
+    '''Return a cursor at the given location in the given translation unit.'''
     cursor = clang.cindex.Cursor.from_location(tu, location)
     return cursor
 
 def get_corresponding_file(file_name, extensions):
+    '''Find a file with the same name and path but having an extension
+       in the list of extensions provided. A name will be returned
+       if there is a file on the disk or an open buffer with an appropriate
+       name, otherwise None will be returned.'''
     file = file_name.split('.')
     ext = file[len(file)-1]
     file = '.'.join(file[:len(file)-1])
@@ -117,18 +145,25 @@ def get_corresponding_file(file_name, extensions):
         return None
 
 def get_header_file(file_name):
+    '''Return a corresponding file with an extension of
+       .hpp, .hxx or .h'''
     header_ext = ['.hpp', '.hxx', '.h']
     return get_corresponding_file(file_name, header_ext)
 def get_source_file(file_name):
+    '''Return a corresponding file with an extension of
+       .cpp, .cxx or .c'''
     source_ext = ['.cpp', '.cxx', '.c']
     return get_corresponding_file(file_name, source_ext)
 
 def get_buffer_with_name(name):
+    '''Return an open buffer with the name name, or none
+       if no such buffer exists.'''
     for buf in vim.buffers:
         if buf.name == name:
             return buf
 
 def is_cursor_function(cursor):
+    '''Return whether the provided cursor is some sort of function.'''
     if cursor.kind == CursorKind.FUNCTION_DECL or \
             cursor.kind == CursorKind.FUNCTION_TEMPLATE or \
             cursor.kind == CursorKind.CXX_METHOD or \
@@ -137,19 +172,9 @@ def is_cursor_function(cursor):
         return True
     return False
 
-def is_scope_block(cursor):
-    return cursor.kind in [
-        clang.cindex.CursorKind.NAMESPACE,
-        clang.cindex.CursorKind.UNION_DECL,
-        clang.cindex.CursorKind.STRUCT_DECL,
-        clang.cindex.CursorKind.ENUM_DECL,
-        clang.cindex.CursorKind.CLASS_DECL,
-        clang.cindex.CursorKind.UNEXPOSED_DECL,
-        clang.cindex.CursorKind.CLASS_TEMPLATE,
-        clang.cindex.CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION
-    ]
-
 def get_function_cursor_from_location(tu, location):
+    '''Return a cursor at the current location that is a function,
+       if one exists.'''
     cursor = get_cursor_from_location(tu, location)
 
     while cursor is not None:
@@ -160,15 +185,20 @@ def get_function_cursor_from_location(tu, location):
     return cursor
 
 def error(str):
+    '''Output an error message.'''
     sys.stderr.write(str)
 
 def iterate_cursor(cursor, fn, parent=None):
+    '''Iterate all children of cursor, calling fn for each.
+       fn may return False to stop recursion into that node's children.'''
     ret = fn(cursor, parent)
     if ret is True:
         for child in cursor.get_children():
             iterate_cursor(child, fn, cursor)
 
 def format_type_name(old_name):
+    '''Reformat a type name to remove the space
+       between the type and * or &.'''
     new_name = old_name
     for i in range(len(old_name)):
         ch = old_name[i]
@@ -179,6 +209,7 @@ def format_type_name(old_name):
     return new_name
 
 def get_args_list(fn_cursor):
+    '''Return a string of arguments to the function fn_cursor'''
     arg_string = []
 
     #get_args is exposed by clang, but in some rare circumstances wasn't
@@ -196,6 +227,8 @@ def get_args_list(fn_cursor):
     return ', '.join(arg_string)
 
 def get_template_args(cursor):
+    '''Return a list of the names of each template argument
+       to cursor. Cursor can be a function or class.'''
     template_args = []
     for child in cursor.get_children():
         if child.kind == CursorKind.TEMPLATE_TYPE_PARAMETER:
@@ -205,7 +238,8 @@ def get_template_args(cursor):
 
 
 def get_template_declaration(cursor):
-    template_string = None 
+    '''Return a template declaration string for cursor'''
+    template_string = None
     template_args = get_template_args(cursor)
     if len(template_args) > 0:
         template_string = 'template<typename '
@@ -215,6 +249,8 @@ def get_template_declaration(cursor):
 
 
 def get_member_class_name(cursor):
+    '''Return the full scope string for the parent class or
+        classes of cursor.'''
     cur = cursor.semantic_parent
     name = []
     while cur is not None:
@@ -256,6 +292,8 @@ def strip_template_args(fn_name):
 
 
 def make_function_header(fn_cursor, inline=False):
+    '''Return a header string for the function fn_cursor.
+       If inline is True, the function is marked inline in the header.'''
     args_list = get_args_list(fn_cursor)
     name = strip_template_args(fn_cursor.spelling)
 
@@ -277,11 +315,11 @@ def make_function_header(fn_cursor, inline=False):
     if fn_cursor.kind != CursorKind.CONSTRUCTOR and \
             fn_cursor.kind != CursorKind.DESTRUCTOR and \
             name != fn_cursor.semantic_parent.spelling:
-        fn_header.extend([format_type_name(return_type),  ' '])
+        fn_header.extend([format_type_name(return_type), ' '])
 
     class_name = get_member_class_name(fn_cursor)
     if class_name is not None and class_name != '':
-        fn_header.extend([class_name,  "::"])
+        fn_header.extend([class_name, "::"])
 
     fn_header.append('{0}({1})'.format(name, args_list))
 
@@ -303,11 +341,17 @@ def make_function_header(fn_cursor, inline=False):
     return ''.join(fn_header)
 
 def find_defined_functions(tu, file, target_fn):
+    '''Return a dictionary of functions defined in the same scope
+       as target_fn. The dictionary has keys containing the names
+       of each functions and values that are lists of all overloads
+       of the function with that name.'''
     traverser = DefinitionTraverser(file, target_fn)
     fn_dict = traverser.traverse(tu.cursor)
     return fn_dict
 
 def get_definition_for_function(definitions, cursor):
+    '''Find the definition for function cursor in definitions if
+       it exists.'''
     name = cursor.spelling
     if name in definitions:
         cur_list = definitions[name]
@@ -317,14 +361,16 @@ def get_definition_for_function(definitions, cursor):
     return None
 
 
-def find_closest_function_definition(tu, out_file, target_fn, \
-        fn_list, definitions):
+def find_closest_function_definition(tu, target_fn, fn_list, definitions):
+    '''Find the first function in fn_list that has a definition in
+       definitions'''
     if len(fn_list) > 0:
         for fn in fn_list:
             return get_definition_for_function(definitions, fn)
     return None
 
 def get_innermost_containing_namespace(cursor):
+    '''Return the innermost namespace that is a parent of cursor'''
     cur = cursor
     while cur is not None:
         if cur.kind == CursorKind.NAMESPACE:
@@ -333,11 +379,14 @@ def get_innermost_containing_namespace(cursor):
     return None
 
 def get_following_declarations(header_file, fn_cursor):
+    '''Get all function declarations in the same scope but below
+       fn_cursor.'''
     traverser = FollowingFunctionTraverser(header_file, fn_cursor)
     return traverser.traverse(fn_cursor.semantic_parent)
 
 
-def get_output_location(tu, fn_cursor, out_file, header_file, above_def):
+def get_output_location(tu, fn_cursor, files, above_def):
+    '''Return the line at which to insert the function definition'''
     parent = fn_cursor.semantic_parent
     inner_namespace = get_innermost_containing_namespace(parent)
 
@@ -349,7 +398,7 @@ def get_output_location(tu, fn_cursor, out_file, header_file, above_def):
 
     #Otherwise, put it at the bottom of the innermost namespace
     if line == 0:
-        traverser = NamespaceTraverser(out_file, fn_cursor)
+        traverser = NamespaceTraverser(files.output, fn_cursor)
         namespace_list = traverser.traverse(tu.cursor)
         namespace_list = namespace_list[::-1]
         
@@ -365,8 +414,10 @@ def get_output_location(tu, fn_cursor, out_file, header_file, above_def):
 
     return (inner_namespace, line - 1)
 
-def generate_method_stub(tu, cursor, out_file, header_file, force=False):
-    definitions = find_defined_functions(tu, out_file, cursor)
+def generate_method_stub(tu, cursor, files, force=False):
+    '''Return a tuple of a string containing the function definition
+       and a line number to insert it for the function cursor.'''
+    definitions = find_defined_functions(tu, files.output, cursor)
     definition = get_definition_for_function(definitions, cursor)
     if definition and not force:
         error("'{0}' is already defined at {1}:{2}".format( 
@@ -374,15 +425,14 @@ def generate_method_stub(tu, cursor, out_file, header_file, force=False):
             definition.location.line))
         return None
     
-    decl_list = get_following_declarations(header_file, cursor)
-    next_def = find_closest_function_definition(tu, out_file, cursor, \
+    decl_list = get_following_declarations(files.header, cursor)
+    next_def = find_closest_function_definition(tu, cursor, \
             decl_list, definitions)
 
-    namespace, line = get_output_location(tu, cursor, out_file, \
-            header_file, next_def)
+    namespace, line = get_output_location(tu, cursor, files, next_def)
 
     inline = False
-    if out_file == header_file:
+    if files.is_output_header():
         inline = True
     header_string = make_function_header(cursor, inline=inline)
     
@@ -391,18 +441,43 @@ def generate_method_stub(tu, cursor, out_file, header_file, force=False):
     return (fn_string, line)
 
 def write_method(fn_string, buffer, line):
+    '''Write the function definition in fn_string to buffer
+       at the line line and jump to the middle of the definition'''
     if line < 0:
         line = len(buffer)
-    buffer[line:line] = fn_string.split('\n')
-    command = 'normal! {0}G'.format(line + 3)
+
+    lines = fn_string.split('\n')
+    buffer[line:line] = lines
+    command = 'normal! {0}G'.format(line + len(lines) - 1)
     vim.command(command)
 
 def source_location_from_position(tu, file_name, line, col):
+    '''Return a clang SourceLocation object for the given location'''
     file = clang.cindex.File.from_name(tu, file_name)
     location = clang.cindex.SourceLocation.from_position(tu, file, line, col)
     return location
 
+def find_fn_name_from_line(str):
+    '''Try to find the last character of the function name
+       on the line provided. This position can be used to get the
+       function cursor for the line.'''
+    last_parenthesis = str.rfind(')')
+    i = last_parenthesis
+    depth = 0
+    while i > 0:
+        if str[i] == ')':
+            depth += 1
+        elif str[i] == '(':
+            depth -= 1
+        if depth == 0:
+            return i - 1
+        i -= 1
+    return None
+
 def get_function_cursor_on_line(tu, location, buffer):
+    '''Return the function cursor on the line of location, using
+       the location as a heuristic and resorting to using
+       find_fn_name_from_line if location doesn't have a function cursor'''
     cursor = get_function_cursor_from_location(tu, location)
     if cursor is None:
         pos = find_fn_name_from_line(buffer[location.line-1])
@@ -414,6 +489,8 @@ def get_function_cursor_on_line(tu, location, buffer):
     return cursor
 
 def build_unsaved_data(files):
+    '''Return a list of unsaved file data for create_translation_unit
+       from the list of files provided.'''
     unsaved_data = []
 
     for file in files:
@@ -424,50 +501,54 @@ def build_unsaved_data(files):
 
     return unsaved_data
 
-def generate_stub_for_cursor(tu, cursor, parse_file, header_file, force=False):
-    buffer = get_buffer_with_name(parse_file)
+def make_fn_definition(tu, cursor, files, force=False):
+    '''Generate and write the function definition for a function cursor'''
+    buffer = get_buffer_with_name(files.output)
 
-    body_and_loc= generate_method_stub(tu, cursor, \
-            parse_file, header_file, force)
+    body_and_loc = generate_method_stub(tu, cursor, files, force)
 
     if body_and_loc is not None:
         if buffer is not vim.current.buffer:
             if buffer is None:
-                vim.command('e {0}'.format(parse_file))
+                vim.command('e {0}'.format(files.output))
                 buffer = vim.current.buffer
             else:
-                vim.command('b! {0}'.format(parse_file))
+                vim.command('b! {0}'.format(files.output))
         function_body, line = body_and_loc
         write_method(function_body, buffer, line)
 
-def generate_over_range(tu, parse_file, header_file, cur_file, \
-        start_line, end_line, force=False):
+def generate_over_range(tu, files, start_line, end_line, force=False):
+    '''Generate declarations for all functions on lines between start_line
+       and end_line'''
     for line in range(start_line, end_line):
-        location = source_location_from_position(tu, cur_file, line, 1)
+        location = source_location_from_position(tu, files.input, line, 1)
         cursor = get_function_cursor_on_line(tu, location, vim.current.buffer)
         if cursor:
-            generate_stub_for_cursor(tu, cursor, parse_file, \
-                    header_file, force)
+            make_fn_definition(tu, cursor, files, force)
 
-def generate_at_location(tu, parse_file, header_file, cur_file, \
-        line, col, force=False):
-    location = source_location_from_position(tu, cur_file, line, col)
+def generate_at_location(tu, files, line, col, force=False):
+    '''Generate a declaration for the provided line'''
+    location = source_location_from_position(tu, files.input, line, col)
     cursor = get_function_cursor_on_line(tu, location, vim.current.buffer)
 
     if cursor is None:
         error('Unable to find a function at the location specified')
         return
 
-    generate_stub_for_cursor(tu, cursor, parse_file, header_file, force)
+    make_fn_definition(tu, cursor, files, force)
 
 def generate_under_cursor(force_inline=False,
-        use_range=False, force_generation=False):
+        use_range=False, force_generation=True):
+    '''Entry point from vim. Get the position of the cursor
+       and name of the current buffer and use those to generate
+       the function definitions'''
     file_name = vim.eval("expand('%')")
 
     file_name = os.path.abspath(file_name)
 
     header_file = get_header_file(file_name)
     source_file = get_source_file(file_name)
+
 
     #TODO: This should probably be made to work
     if source_file == file_name:
@@ -481,32 +562,18 @@ def generate_under_cursor(force_inline=False,
     else:
         parse_file = header_file
 
+    files = FileSet(source_file, header_file, file_name, parse_file)
+
     index = clang.cindex.Index.create()
     tu = create_translation_unit(index, parse_file, unsaved_data)
 
     if use_range:
         first_line = vim.current.range.start
         last_line = vim.curent.range.end
-        generate_over_range(tu, parse_file, header_file, file_name, \
-                first_line, last_line, force_generation)
+        generate_over_range(tu, files, first_line, last_line, force_generation)
     else:
         _, line, col, _ = vim.eval("getpos('.')")
         line = int(line)
         col = int(col)
-        generate_at_location(tu, parse_file, header_file, file_name, \
-                line, col, force_generation)
+        generate_at_location(tu, files, line, col, force_generation)
 
-def find_fn_name_from_line(str):
-    last_parenthesis = str.rfind(')')
-    i = last_parenthesis
-    depth = 0
-    while i > 0:
-        if str[i] == ')':
-            depth += 1
-        elif str[i] == '(':
-            depth -= 1
-        if depth == 0:
-            return i - 1
-        i -= 1
-    return None
-    
