@@ -396,7 +396,7 @@ def build_unsaved_data(files):
 
     return unsaved_data
 
-def generate_under_cursor():
+def generate_under_cursor(force_inline=False):
     file_name = vim.eval("expand('%')")
     _, line, col, _ = vim.eval("getpos('.')")
     line = int(line)
@@ -414,7 +414,7 @@ def generate_under_cursor():
 
     unsaved_data = build_unsaved_data([header_file, source_file])
 
-    if source_file:
+    if source_file and not force_inline:
         parse_file_name = source_file
     else:
         parse_file_name = header_file
