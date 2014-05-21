@@ -502,7 +502,7 @@ def write_method(fn_string, buffer, line, above_endif=False):
 
     lines = fn_string.split('\n')
     buffer[line:line] = lines
-    command = 'normal! {0}G'.format(line + len(lines) - 1)
+    command = 'normal! {0}G'.format(line + len(lines) - 2)
     vim.command(command)
 
 def source_location_from_position(tu, file_name, line, col):
@@ -515,15 +515,21 @@ def find_fn_name_from_line(str):
     '''Try to find the last character of the function name
        on the line provided. This position can be used to get the
        function cursor for the line.'''
-    last_parenthesis = str.rfind(')')
-    i = last_parenthesis
+    i = len(str) - 1
     depth = 0
-    while i > 0:
+    found_one = False
+    while i >= 0:
         if str[i] == ')':
+            found_one = True
             depth += 1
         elif str[i] == '(':
+            found_one = True
             depth -= 1
-        if depth == 0:
+        elif str[i] == '}':
+            depth += 1
+        elif str[i] == '{':
+            depth -= 1
+        if depth == 0 and found_one:
             return i - 1
         i -= 1
     return None
@@ -571,14 +577,19 @@ def make_fn_definition(tu, cursor, files, force=False):
         function_body, line = body_and_loc
         write_method(function_body, buffer, line, files.is_output_header)
 
-def generate_over_range(tu, files, start_line, end_line, force=False):
+def generate_over_range(index, files, start_line, end_line, force=False):
     '''Generate declarations for all functions on lines between start_line
        and end_line'''
-    for line in range(start_line, end_line):
+    in_buf = get_buffer_with_name(files.input)
+    unsaved_data = build_unsaved_data([files.header, files.source])
+    tu = create_translation_unit(index, files.output, unsaved_data)
+    for line in range(start_line, end_line+1):
         location = source_location_from_position(tu, files.input, line, 1)
-        cursor = get_function_cursor_on_line(tu, location, vim.current.buffer)
+        cursor = get_function_cursor_on_line(tu, location, in_buf)
         if cursor:
             make_fn_definition(tu, cursor, files, force)
+            unsaved_data = build_unsaved_data([files.header, files.source])
+            tu = create_translation_unit(index, files.output, unsaved_data)
 
 def generate_at_location(tu, files, line, col, force=False):
     '''Generate a declaration for the provided line'''
@@ -591,25 +602,10 @@ def generate_at_location(tu, files, line, col, force=False):
 
     make_fn_definition(tu, cursor, files, force)
 
-def generate_under_cursor(force_inline=False,
-        use_range=False, force_generation=True):
-    '''Entry point from vim. Get the position of the cursor
-       and name of the current buffer and use those to generate
-       the function definitions'''
-    file_name = vim.eval("expand('%')")
-
-    file_name = os.path.abspath(file_name)
-
+def make_fileset_for_source(source_file, force_inline):
+    file_name = os.path.abspath(source_file)
     header_file = get_header_file(file_name)
     source_file = get_source_file(file_name)
-
-
-    #TODO: This should probably be made to work
-    if source_file == file_name:
-        error("Unable to implement a method in the source file.")
-        return
-
-    unsaved_data = build_unsaved_data([header_file, source_file])
 
     if source_file and not force_inline:
         parse_file = source_file
@@ -617,17 +613,33 @@ def generate_under_cursor(force_inline=False,
         parse_file = header_file
 
     files = FileSet(source_file, header_file, file_name, parse_file)
+    return files
+
+
+def generate_under_cursor(force_inline=False, force_generation=False):
+    '''Entry point from vim. Get the position of the cursor
+       and name of the current buffer and use those to generate
+       the function definitions'''
+    file_name = vim.eval("expand('%')")
+
+    files = make_fileset_for_source(file_name, force_inline)
+
+    unsaved_data = build_unsaved_data([files.header, files.source])
 
     index = clang.cindex.Index.create()
-    tu = create_translation_unit(index, parse_file, unsaved_data)
+    tu = create_translation_unit(index, files.output, unsaved_data)
 
-    if use_range:
-        first_line = vim.current.range.start
-        last_line = vim.curent.range.end
-        generate_over_range(tu, files, first_line, last_line, force_generation)
-    else:
-        _, line, col, _ = vim.eval("getpos('.')")
-        line = int(line)
-        col = int(col)
-        generate_at_location(tu, files, line, col, force_generation)
+    _, line, col, _ = vim.eval("getpos('.')")
+    line = int(line)
+    col = int(col)
+    generate_at_location(tu, files, line, col, force_generation)
 
+def generate_range(start_line, end_line, force_inline=False, \
+        force_generation=False):
+    file_name = vim.eval("expand('%')")
+
+    files = make_fileset_for_source(file_name, force_inline)
+
+    index = clang.cindex.Index.create()
+
+    generate_over_range(index, files, start_line, end_line, force_generation)
