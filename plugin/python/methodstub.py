@@ -498,6 +498,7 @@ def write_method(fn_string, buffer, line, above_endif=False):
             for i in range(len(buffer) - 1, 1, -1):
                 if buffer[i].find('#endif') >= 0:
                     line = i
+                    break
 
     lines = fn_string.split('\n')
     buffer[line:line] = lines
