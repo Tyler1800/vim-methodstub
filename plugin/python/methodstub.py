@@ -1,6 +1,5 @@
 import os
 import sys
-import collections
 
 import clang.cindex
 from clang.cindex import CursorKind
@@ -27,15 +26,21 @@ class Traverser(object):
         return self._output
 
 class NamespaceTraverser(Traverser):
-    def __init__(self, source_file):
+    def __init__(self, source_file, target_fn):
         self._source_file = source_file
+        self._target_fn = target_fn
         self._output = []
 
     def _traversal_fn(self, cursor, parent):
         if cursor.location is not None and cursor.location.file is not None:
             if cursor.location.file.name == self._source_file:
                 if cursor.kind == CursorKind.NAMESPACE:
-                    self._output.append(cursor)
+                    parent = self._target_fn.semantic_parent
+                    while parent is not None:
+                        if parent.canonical == cursor.canonical:
+                            self._output.append(cursor)
+                            break
+                        parent = parent.semantic_parent
                     return True
             else:
                 return False
@@ -297,18 +302,26 @@ def make_function_header(fn_cursor, inline=False):
 
     return ''.join(fn_header)
 
-def find_closest_function_definition(tu, out_file, target_fn, fn_list):
+def find_defined_functions(tu, file, target_fn):
+    traverser = DefinitionTraverser(file, target_fn)
+    fn_dict = traverser.traverse(tu.cursor)
+    return fn_dict
+
+def get_definition_for_function(definitions, cursor):
+    name = cursor.spelling
+    if name in definitions:
+        cur_list = definitions[name]
+        for cur in cur_list:
+            if cur.canonical == cursor.canonical:
+                return cur
+    return None
+
+
+def find_closest_function_definition(tu, out_file, target_fn, \
+        fn_list, definitions):
     if len(fn_list) > 0:
-        traverser = DefinitionTraverser(out_file, target_fn)
-        fn_dict = traverser.traverse(tu.cursor)
-        
         for fn in fn_list:
-            name = fn.spelling
-            if name in fn_dict:
-                cur_list = fn_dict[name]
-                for cur in cur_list:
-                    if cur.canonical == fn.canonical:
-                        return cur
+            return get_definition_for_function(definitions, fn)
     return None
 
 def get_innermost_containing_namespace(cursor):
@@ -319,29 +332,30 @@ def get_innermost_containing_namespace(cursor):
         cur = cur.semantic_parent
     return None
 
+def get_following_declarations(header_file, fn_cursor):
+    traverser = FollowingFunctionTraverser(header_file, fn_cursor)
+    return traverser.traverse(fn_cursor.semantic_parent)
 
-def get_output_location(tu, fn_cursor, out_file, header_file):
+
+def get_output_location(tu, fn_cursor, out_file, header_file, above_def):
     parent = fn_cursor.semantic_parent
     inner_namespace = get_innermost_containing_namespace(parent)
-
-    traverser = FollowingFunctionTraverser(header_file, fn_cursor)
-    fn_list = traverser.traverse(parent)
 
     line = 0
 
     #Try to put the new function above the function below it in the header
-    fn_def = find_closest_function_definition(tu, out_file, fn_cursor, fn_list)
-    if fn_def:
-        line = fn_def.extent.start.line
+    if above_def is not None:
+        line = above_def.extent.start.line
 
     #Otherwise, put it at the bottom of the innermost namespace
     if line == 0:
-        traverser = NamespaceTraverser(out_file)
+        traverser = NamespaceTraverser(out_file, fn_cursor)
         namespace_list = traverser.traverse(tu.cursor)
+        namespace_list = namespace_list[::-1]
         
         inner_namespace = None
         if len(namespace_list) > 0:
-            inner_namespace = namespace_list[len(namespace_list) -1]
+            inner_namespace = namespace_list[0]
 
         line = 0
         if inner_namespace:
@@ -351,8 +365,22 @@ def get_output_location(tu, fn_cursor, out_file, header_file):
 
     return (inner_namespace, line - 1)
 
-def generate_method_stub(tu, cursor, out_file, header_file):
-    namespace, line = get_output_location(tu, cursor, out_file, header_file)
+def generate_method_stub(tu, cursor, out_file, header_file, force=False):
+    definitions = find_defined_functions(tu, out_file, cursor)
+    definition = get_definition_for_function(definitions, cursor)
+    if definition and not force:
+        error("'{0}' is already defined at {1}:{2}".format( 
+            cursor.displayname, definition.location.file, \
+            definition.location.line))
+        return None
+    
+    decl_list = get_following_declarations(header_file, cursor)
+    next_def = find_closest_function_definition(tu, out_file, cursor, \
+            decl_list, definitions)
+
+    namespace, line = get_output_location(tu, cursor, out_file, \
+            header_file, next_def)
+
     inline = False
     if out_file == header_file:
         inline = True
@@ -396,51 +424,77 @@ def build_unsaved_data(files):
 
     return unsaved_data
 
-def generate_under_cursor(force_inline=False):
-    file_name = vim.eval("expand('%')")
-    _, line, col, _ = vim.eval("getpos('.')")
-    line = int(line)
-    col = int(col)
+def generate_stub_for_cursor(tu, cursor, parse_file, header_file, force=False):
+    buffer = get_buffer_with_name(parse_file)
 
-    name = os.path.abspath(file_name)
+    body_and_loc= generate_method_stub(tu, cursor, \
+            parse_file, header_file, force)
 
-    header_file = get_header_file(name)
-    source_file = get_source_file(name)
+    if body_and_loc is not None:
+        if buffer is not vim.current.buffer:
+            if buffer is None:
+                vim.command('e {0}'.format(parse_file))
+                buffer = vim.current.buffer
+            else:
+                vim.command('b! {0}'.format(parse_file))
+        function_body, line = body_and_loc
+        write_method(function_body, buffer, line)
 
-    #TODO: This should probably be made to work
-    if source_file == name:
-        error("Unable to implement a method in the source file.")
-        return
+def generate_over_range(tu, parse_file, header_file, cur_file, \
+        start_line, end_line, force=False):
+    for line in range(start_line, end_line):
+        location = source_location_from_position(tu, cur_file, line, 1)
+        cursor = get_function_cursor_on_line(tu, location, vim.current.buffer)
+        if cursor:
+            generate_stub_for_cursor(tu, cursor, parse_file, \
+                    header_file, force)
 
-    unsaved_data = build_unsaved_data([header_file, source_file])
-
-    if source_file and not force_inline:
-        parse_file_name = source_file
-    else:
-        parse_file_name = header_file
-
-    index = clang.cindex.Index.create()
-    tu = create_translation_unit(index, parse_file_name, unsaved_data)
-
-    location = source_location_from_position(tu, name, line, col)
-
+def generate_at_location(tu, parse_file, header_file, cur_file, \
+        line, col, force=False):
+    location = source_location_from_position(tu, cur_file, line, col)
     cursor = get_function_cursor_on_line(tu, location, vim.current.buffer)
 
     if cursor is None:
         error('Unable to find a function at the location specified')
         return
 
-    buffer = get_buffer_with_name(parse_file_name)
-    if buffer is not vim.current.buffer:
-        if buffer is None:
-            vim.command('e {0}'.format(source_file))
-            buffer = vim.current.buffer
-        else:
-            vim.command('b! {0}'.format(source_file))
+    generate_stub_for_cursor(tu, cursor, parse_file, header_file, force)
 
-    function_body, line = generate_method_stub(tu, cursor, \
-            parse_file_name, header_file)
-    write_method(function_body, buffer, line)
+def generate_under_cursor(force_inline=False,
+        use_range=False, force_generation=False):
+    file_name = vim.eval("expand('%')")
+
+    file_name = os.path.abspath(file_name)
+
+    header_file = get_header_file(file_name)
+    source_file = get_source_file(file_name)
+
+    #TODO: This should probably be made to work
+    if source_file == file_name:
+        error("Unable to implement a method in the source file.")
+        return
+
+    unsaved_data = build_unsaved_data([header_file, source_file])
+
+    if source_file and not force_inline:
+        parse_file = source_file
+    else:
+        parse_file = header_file
+
+    index = clang.cindex.Index.create()
+    tu = create_translation_unit(index, parse_file, unsaved_data)
+
+    if use_range:
+        first_line = vim.current.range.start
+        last_line = vim.curent.range.end
+        generate_over_range(tu, parse_file, header_file, file_name, \
+                first_line, last_line, force_generation)
+    else:
+        _, line, col, _ = vim.eval("getpos('.')")
+        line = int(line)
+        col = int(col)
+        generate_at_location(tu, parse_file, header_file, file_name, \
+                line, col, force_generation)
 
 def find_fn_name_from_line(str):
     last_parenthesis = str.rfind(')')
