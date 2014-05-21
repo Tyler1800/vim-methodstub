@@ -6,5 +6,5 @@ function! s:ClassTemplateInit()
     python import sys
     execute 'python sys.path.append('' . s:plugin_path . '')'
     execute 'pyfile ' . fnameescape(s:plugin_path) . '/python/methodstub.py'
-    command! -buffer -nargs=* GenFnStub python generate_under_cursor()
+    command! -buffer -nargs=* GenFnStub python generate_under_cursor(<f-args>)
 endfunction

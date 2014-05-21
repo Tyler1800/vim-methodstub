@@ -488,11 +488,16 @@ def generate_method_stub(tu, cursor, files, force=False):
 
     return (fn_string, line)
 
-def write_method(fn_string, buffer, line):
+def write_method(fn_string, buffer, line, above_endif=False):
     '''Write the function definition in fn_string to buffer
        at the line line and jump to the middle of the definition'''
-    if line < 0:
+    if line <= 0:
+        #For headers, we need to manually search for #endif at the bottom
         line = len(buffer)
+        if above_endif:
+            for i in range(len(buffer) - 1, 1, -1):
+                if buffer[i].find('#endif') >= 0:
+                    line = i
 
     lines = fn_string.split('\n')
     buffer[line:line] = lines
@@ -563,7 +568,7 @@ def make_fn_definition(tu, cursor, files, force=False):
             else:
                 vim.command('b! {0}'.format(files.output))
         function_body, line = body_and_loc
-        write_method(function_body, buffer, line)
+        write_method(function_body, buffer, line, files.is_output_header)
 
 def generate_over_range(tu, files, start_line, end_line, force=False):
     '''Generate declarations for all functions on lines between start_line
