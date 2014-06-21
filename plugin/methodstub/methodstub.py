@@ -1,7 +1,6 @@
 import os
 import sys
 import collections
-import bisect
 
 import clang.cindex
 from clang.cindex import CursorKind
@@ -286,7 +285,7 @@ def format_type_name(old_name):
                 break
     return new_name
 
-def get_args_list(fn_cursor):
+def get_args_list(fn_cursor, strip_namespaces=[]):
     '''Return a string of arguments to the function fn_cursor'''
     arg_string = []
 
@@ -298,6 +297,7 @@ def get_args_list(fn_cursor):
             type_name = format_type_name(child.type.spelling)
             arg_fragments.append(type_name)
             name = child.spelling
+            type_name = strip_type_namespaces(type_name, strip_namespaces) 
             if name != '':
                 arg_fragments.append(name)
             arg_string.append(' '.join(arg_fragments))
@@ -386,13 +386,27 @@ def add_function_specifiers(fn_cursor, header):
         elif t.spelling == 'constexpr' and depth == 0:
             header.appendleft('constexpr ')
 
-def make_function_header(fn_cursor, inline=False, namespace=''):
+def strip_type_namespaces(str, strip_namespaces):
+    parts = collections.deque(str.split('::'))
+    
+    for namespace in strip_namespaces:
+        if parts[0] == namespace.spelling:
+            parts.popleft()
+        else:
+            break
+
+    return '::'.join(parts)
+
+
+def make_function_header(fn_cursor, inline=False, namespace='',
+        strip_namespaces=[]):
     '''Return a header string for the function fn_cursor.
        If inline is True, the function is marked inline in the header.'''
-    args_list = get_args_list(fn_cursor)
+    args_list = get_args_list(fn_cursor, strip_namespaces)
     name = strip_template_args(fn_cursor.spelling)
 
     return_type = fn_cursor.result_type.spelling
+    return_type = strip_type_namespaces(return_type, strip_namespaces)
     class_template_decl = get_template_declaration(fn_cursor.semantic_parent)
     fn_template_decl = get_template_declaration(fn_cursor)
 
@@ -537,12 +551,13 @@ def generate_method_stub(tu, cursor, files, lexical_namespaces):
     namespaces = get_namespaces(cursor)
 
     namespace_str = build_namespace_scope_resolution(namespaces, lexical_namespaces)
+    print(lexical_namespaces, namespaces, namespace_str)
 
     inline = False
     if files.is_output_header():
         inline = True
     header_string = make_function_header(cursor, inline=inline, \
-            namespace=namespace_str)
+            namespace=namespace_str, strip_namespaces=lexical_namespaces)
 
     fn_string = '\n'.join([header_string, '{', ' ', '}', ' '])
 
@@ -637,6 +652,9 @@ def generate_over_range(index, files, start_line, end_line, force=False):
     unsaved_data = build_unsaved_data([files.header, files.source])
     tu = create_translation_unit(index, files.output, unsaved_data)
     tracker = InsertionTracker()
+
+    buffer = open_output_buffer(files.output)
+    start_len = len(buffer)
     for line in range(start_line, end_line+1):
         location = source_location_from_position(tu, files.input, line, 1)
         cursor = get_function_cursor_on_line(tu, location, in_buf)
@@ -646,7 +664,7 @@ def generate_over_range(index, files, start_line, end_line, force=False):
         if cursor:
             definitions = find_defined_functions(tu, files.output, cursor)
             definition = get_definition_for_function(definitions, cursor)
-            if definition is not None:
+            if definition is not None and not force:
                 continue
             
             decl_list = get_following_declarations(files.header, cursor)
@@ -661,8 +679,9 @@ def generate_over_range(index, files, start_line, end_line, force=False):
 
                 insert_line = get_output_location(tu, cursor, files, \
                         next_def, lexical_namespaces)
+                if insert_line == -1:
+                    insert_line = - 1
                 out_line = tracker.map_line_number(insert_line)
-            buffer = open_output_buffer(files.output)
             body = generate_method_stub(tu, cursor, files, lexical_namespaces)
             tracker.insert_block(insert_line, cursor.displayname, len(body.split('\n')))
             write_method(body, buffer, out_line, files.is_output_header)

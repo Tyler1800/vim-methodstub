@@ -8,11 +8,11 @@ function! s:ClassTemplateInit()
         execute 'python sys.path.append("' . s:plugin_path . '")'
         execute 'python from methodstub import methodstub'
         execute 'python from methodstub import accessor'
-        command! -buffer -nargs=* GenFnStub python methodstub.generate_under_cursor(<f-args>)
-        command! -buffer -range -nargs=* GenFnStubRange <line1>,<line2>call <SID>GenFnStubRange(<f-args>)
-        command! -buffer -nargs=* GenFieldAccessors python accessor.generate_under_cursor(<f-args>)
         let s:methodstub_plugin_loaded = 1
     endif
+    command! -buffer -nargs=* GenFnStub python methodstub.generate_under_cursor(<f-args>)
+    command! -buffer -range -nargs=* GenFnStubRange <line1>,<line2>call <SID>GenFnStubRange(<f-args>)
+    command! -buffer -nargs=* GenFieldAccessors python accessor.generate_under_cursor(<f-args>)
 endfunction
 
 function! s:GenFnStubRange(inline) range abort
