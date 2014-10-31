@@ -372,6 +372,8 @@ def add_function_specifiers(fn_cursor, header):
     '''Find specifier keywords in the token stream and add them
        to the deque header'''
     depth = 0
+    name = fn_cursor.spelling
+    found_fn = False
     for t in fn_cursor.get_tokens():
         if t.spelling == '{':
             break
@@ -379,7 +381,9 @@ def add_function_specifiers(fn_cursor, header):
             depth += 1
         elif t.spelling == ')':
             depth -= 1
-        elif t.spelling == 'const' and depth == 0:
+        elif t.spelling == name:
+            found_fn = True
+        elif t.spelling == 'const' and depth == 0 and found_fn:
             header.append(' const')
         elif t.spelling == 'noexcept' and depth == 0:
             header.append(' noexcept')
