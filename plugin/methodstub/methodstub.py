@@ -383,6 +383,9 @@ def add_function_specifiers(fn_cursor, header):
             depth -= 1
         elif t.spelling == name:
             found_fn = True
+        #Special case to handle overloaded operators
+        elif t.spelling == 'operator':
+            found_fn = True
         elif t.spelling == 'const' and depth == 0 and found_fn:
             header.append(' const')
         elif t.spelling == 'noexcept' and depth == 0:
