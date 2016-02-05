@@ -7,6 +7,13 @@ from clang.cindex import CursorKind
 
 import vim
 
+flags = [
+    '-xc++',
+    '-std=c++14',
+    #A bug in clang causes vim to break if this is not specified
+    '-fno-color-diagnostics'
+        ]
+
 class InsertionBlock(object):
     def __init__(self, key, length, line):
         self.key = key
@@ -189,7 +196,7 @@ def create_translation_unit(index, source, unsaved_data=[]):
     '''Build a translation unit by parsing the file source using
        index index with unsaved_data containing a list of(name, data) tuples
        with the full content of any unsaved buffers.'''
-    return index.parse(None, [source] + ['-xc++', '-std=c++11'], \
+    return index.parse(None, [source] + flags, \
             unsaved_data, \
             clang.cindex.TranslationUnit.PARSE_SKIP_FUNCTION_BODIES)
 
