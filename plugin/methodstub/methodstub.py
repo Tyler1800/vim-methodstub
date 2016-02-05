@@ -558,7 +558,6 @@ def generate_method_stub(tu, cursor, files, lexical_namespaces):
     namespaces = get_namespaces(cursor)
 
     namespace_str = build_namespace_scope_resolution(namespaces, lexical_namespaces)
-    print(lexical_namespaces, namespaces, namespace_str)
 
     inline = False
     if files.is_output_header():
@@ -762,4 +761,3 @@ def generate_range(start_line, end_line, force_inline=False, \
 
     index = clang.cindex.Index.create()
 
-    generate_over_range(index, files, start_line, end_line, force_generation)
